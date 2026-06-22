@@ -231,22 +231,20 @@ export default function App() {
     let category = "other";
 
     try {
-      const ids = CATEGORIES.map(c => c.id).join(", ");
-      const prompt = `Classify this expense into exactly one of: ${ids}.\nDescription: "${desc.trim()}"\nAmount: ₹${amount}\nNature: ${nature === "need" ? "Need" : "Want"}\nRespond with ONLY the category id.`;
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
+      const res = await fetch("/api/classify", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          model: "claude-sonnet-4-6",
-          max_tokens: 20,
-          messages: [{ role: "user", content: prompt }]
+          description: desc.trim(),
+          amount,
+          nature: nature === "need" ? "Need" : "Want",
+          categories: CATEGORIES.map(c => c.id).join(", ")
         })
       });
       const data = await res.json();
-      const raw = data.content?.[0]?.text?.trim().toLowerCase() || "other";
-      category = CATEGORIES.find(c => c.id === raw)?.id || "other";
+      category = CATEGORIES.find(c => c.id === data.category)?.id || "other";
     } catch {
-      // CORS in local dev or network error — category stays "other"
+      // network error — category stays "other"
     }
 
     try {
