@@ -18,6 +18,7 @@ const CATEGORIES = [
 ];
 
 const fmt = (n) => "₹" + Math.round(n).toLocaleString("en-IN");
+const fmtSigned = (n) => (n < 0 ? "-" : "") + fmt(Math.abs(n));
 
 function DonutChart({ segments, total, size = 180 }) {
   const r = size * 0.36, cx = size / 2, cy = size / 2;
@@ -63,7 +64,7 @@ function Bar({ pct, color }) {
 }
 
 // ---- Summary panel (shared between mobile overview and desktop sidebar) ----
-function SummaryPanel({ segments, catTotals, total, incomeVal, remaining, savingsRate, needsTotal, wantsTotal, topCat, monthLabel, donutSize }) {
+function SummaryPanel({ segments, catTotals, total, incomeVal, remaining, savingsRate, needsTotal, wantsTotal, topCat, monthLabel, balance, donutSize }) {
   return (
     <>
       {/* Donut */}
@@ -102,9 +103,13 @@ function SummaryPanel({ segments, catTotals, total, incomeVal, remaining, saving
 
       {/* Stat pills */}
       <div style={{ display: "grid", gap: 8 }}>
+        <div style={{ background: balance >= 0 ? "#052e16" : "#2d1515", border: `1px solid ${balance >= 0 ? "#166534" : "#7f1d1d"}`, borderRadius: 10, padding: "11px 14px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <span style={{ fontSize: 12, color: "#94a3b8" }}>Current balance</span>
+          <span style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 15, fontWeight: 700, color: balance >= 0 ? "#4ade80" : "#f87171" }}>{fmtSigned(balance)}</span>
+        </div>
         {incomeVal > 0 && (
-          <div style={{ background: remaining >= 0 ? "#052e16" : "#2d1515", border: `1px solid ${remaining >= 0 ? "#166534" : "#7f1d1d"}`, borderRadius: 10, padding: "11px 14px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-            <span style={{ fontSize: 12, color: "#94a3b8" }}>{remaining >= 0 ? "Remaining" : "Over budget"}</span>
+          <div style={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 10, padding: "11px 14px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <span style={{ fontSize: 12, color: "#94a3b8" }}>{remaining >= 0 ? "Left this month" : "Overspent this month"}</span>
             <span style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 15, fontWeight: 700, color: remaining >= 0 ? "#4ade80" : "#f87171" }}>{fmt(Math.abs(remaining))}</span>
           </div>
         )}
@@ -136,20 +141,31 @@ function SummaryPanel({ segments, catTotals, total, incomeVal, remaining, saving
 }
 
 export default function App() {
-  const [income, setIncome] = useState("");
   const [entries, setEntries] = useState([]);
+  const [incomes, setIncomes] = useState([]);
+  const [showIncomeForm, setShowIncomeForm] = useState(false);
+  const [incomeDesc, setIncomeDesc] = useState("");
+  const [incomeAmount, setIncomeAmount] = useState("");
+  const [incomeError, setIncomeError] = useState("");
+  const [incomeSaving, setIncomeSaving] = useState(false);
 
   useEffect(() => {
     const q = query(collection(db, "entries"), orderBy("createdAt", "desc"));
     const unsub = onSnapshot(q, (snapshot) => {
-      const data = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
-      setEntries(data);
+      setEntries(snapshot.docs.map(d => ({ id: d.id, ...d.data() })));
     });
-    return () => unsub();
-  }, []); const [desc, setDesc] = useState("");
+    const qi = query(collection(db, "incomes"), orderBy("createdAt", "desc"));
+    const unsubIncomes = onSnapshot(qi, (snapshot) => {
+      setIncomes(snapshot.docs.map(d => ({ id: d.id, ...d.data() })));
+    });
+    return () => { unsub(); unsubIncomes(); };
+  }, []);
+
+  const [desc, setDesc] = useState("");
   const [amount, setAmount] = useState("");
   const [nature, setNature] = useState("need");
   const [loading, setLoading] = useState(false);
+  const [justSaved, setJustSaved] = useState(false);
   const [error, setError] = useState("");
   const [mobileTab, setMobileTab] = useState("add"); // "overview" | "add" | "history"
   const [month, setMonth] = useState(() => {
@@ -168,7 +184,13 @@ export default function App() {
   }, [monthEntries]);
 
   const total = useMemo(() => Object.values(catTotals).reduce((a, b) => a + b, 0), [catTotals]);
-  const incomeVal = parseFloat(income) || 0;
+  const monthIncomes = useMemo(() => incomes.filter(e => e.date.startsWith(month)), [incomes, month]);
+  const incomeVal = useMemo(() => monthIncomes.reduce((a, e) => a + e.amount, 0), [monthIncomes]);
+  // Rolling balance: everything ever received minus everything ever spent
+  const balance = useMemo(
+    () => incomes.reduce((a, e) => a + e.amount, 0) - entries.reduce((a, e) => a + e.amount, 0),
+    [incomes, entries]
+  );
   const remaining = incomeVal - total;
   const savingsRate = incomeVal > 0 ? ((incomeVal - total) / incomeVal) * 100 : null;
   const wantsTotal = useMemo(() => monthEntries.filter(e => e.nature === "want").reduce((a, e) => a + e.amount, 0), [monthEntries]);
@@ -179,6 +201,10 @@ export default function App() {
   }, [catTotals, total]);
   const segments = CATEGORIES.map(c => ({ ...c, value: catTotals[c.id] }));
   const getCat = id => CATEGORIES.find(c => c.id === id) || CATEGORIES[CATEGORIES.length - 1];
+  const monthFeed = useMemo(() => [
+    ...monthIncomes.map(e => ({ ...e, kind: "income" })),
+    ...monthEntries.map(e => ({ ...e, kind: "expense" })),
+  ].sort((a, b) => b.createdAt - a.createdAt), [monthIncomes, monthEntries]);
 
   // async function handleAdd() {
   //   if (!desc.trim() || !amount || parseFloat(amount) <= 0) {
@@ -259,8 +285,9 @@ export default function App() {
       };
       await addDoc(collection(db, "entries"), entry);
       setDesc(""); setAmount(""); setNature("need");
-      setMobileTab("history");
-    } catch (e) {
+      setJustSaved(true);
+      setTimeout(() => setJustSaved(false), 2000);
+    } catch {
       setError("Could not save entry. Check your connection.");
     } finally {
       setLoading(false);
@@ -271,21 +298,69 @@ export default function App() {
     await deleteDoc(doc(db, "entries", id));
   }
 
-  const summaryProps = { segments, catTotals, total, incomeVal, remaining, savingsRate, needsTotal, wantsTotal, topCat, monthLabel };
+  async function handleAddIncome() {
+    const amt = parseFloat(incomeAmount);
+    if (!amt || amt <= 0) { setIncomeError("Enter a valid amount."); return; }
+    setIncomeError(""); setIncomeSaving(true);
+    try {
+      await addDoc(collection(db, "incomes"), {
+        desc: incomeDesc.trim() || "Salary",
+        amount: amt,
+        date: new Date().toISOString().slice(0, 10),
+        time: new Date().toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }),
+        createdAt: Date.now()
+      });
+      setIncomeDesc(""); setIncomeAmount(""); setShowIncomeForm(false);
+    } catch {
+      setIncomeError("Could not save income. Check your connection.");
+    } finally {
+      setIncomeSaving(false);
+    }
+  }
+
+  async function deleteIncome(id) {
+    await deleteDoc(doc(db, "incomes", id));
+  }
+
+  const summaryProps = { segments, catTotals, total, incomeVal, remaining, savingsRate, needsTotal, wantsTotal, topCat, monthLabel, balance };
 
   const AddForm = (
     <div style={{ display: "grid", gap: 12 }}>
-      {/* Income */}
-      <div style={{ background: "#1e293b", borderRadius: 12, padding: "14px 16px", border: "1px solid #334155", display: "flex", alignItems: "center", gap: 12 }}>
-        <span style={{ fontSize: 20 }}>💵</span>
-        <div style={{ flex: 1 }}>
-          <label style={{ fontSize: 10, letterSpacing: 1.5, color: "#64748b", textTransform: "uppercase", fontFamily: "'JetBrains Mono',monospace", display: "block", marginBottom: 3 }}>Monthly Income</label>
-          <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
-            <span style={{ color: "#64748b", fontFamily: "'JetBrains Mono',monospace", fontSize: 16 }}>₹</span>
-            <input type="number" placeholder="0" value={income} onChange={e => setIncome(e.target.value)}
-              style={{ background: "transparent", border: "none", color: "#84cc16", fontFamily: "'JetBrains Mono',monospace", fontSize: 22, fontWeight: 700, width: "100%", outline: "none" }} />
+      {/* Balance */}
+      <div style={{ background: "#1e293b", borderRadius: 12, padding: "14px 16px", border: "1px solid #334155" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <span style={{ fontSize: 20 }}>💵</span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <label style={{ fontSize: 10, letterSpacing: 1.5, color: "#64748b", textTransform: "uppercase", fontFamily: "'JetBrains Mono',monospace", display: "block", marginBottom: 3 }}>Current Balance</label>
+            <span style={{ color: balance >= 0 ? "#84cc16" : "#f87171", fontFamily: "'JetBrains Mono',monospace", fontSize: 22, fontWeight: 700 }}>{fmtSigned(balance)}</span>
           </div>
+          <button onClick={() => { setShowIncomeForm(s => !s); setIncomeError(""); }} style={{
+            background: showIncomeForm ? "transparent" : "#166534", border: "1px solid #166534", borderRadius: 8,
+            padding: "8px 12px", color: showIncomeForm ? "#94a3b8" : "#fff", fontSize: 13, fontWeight: 600,
+            cursor: "pointer", flexShrink: 0, transition: "all 0.2s"
+          }}>{showIncomeForm ? "✕ Close" : "+ Income"}</button>
         </div>
+        {showIncomeForm && (
+          <div style={{ marginTop: 12, borderTop: "1px solid #334155", paddingTop: 12 }}>
+            <input placeholder="Source, e.g. July salary, freelance, refund..."
+              value={incomeDesc} onChange={e => setIncomeDesc(e.target.value)}
+              onKeyDown={e => e.key === "Enter" && handleAddIncome()}
+              style={{ width: "100%", background: "#0f172a", border: "1px solid #334155", borderRadius: 8, padding: "11px 13px", color: "#e2e8f0", fontSize: 15, outline: "none", marginBottom: 10 }} />
+            <div style={{ display: "flex", gap: 8 }}>
+              <div style={{ flex: 1, background: "#0f172a", border: "1px solid #334155", borderRadius: 8, padding: "10px 13px", display: "flex", alignItems: "center", gap: 6 }}>
+                <span style={{ color: "#64748b", fontFamily: "'JetBrains Mono',monospace", fontSize: 16 }}>₹</span>
+                <input type="number" placeholder="Amount" value={incomeAmount} onChange={e => setIncomeAmount(e.target.value)}
+                  onKeyDown={e => e.key === "Enter" && handleAddIncome()}
+                  style={{ background: "transparent", border: "none", color: "#84cc16", fontFamily: "'JetBrains Mono',monospace", fontSize: 19, fontWeight: 700, width: "100%", outline: "none" }} />
+              </div>
+              <button onClick={handleAddIncome} disabled={incomeSaving} style={{
+                background: "#166534", border: "none", borderRadius: 8, padding: "0 18px",
+                color: "#fff", fontSize: 14, fontWeight: 600, cursor: "pointer", opacity: incomeSaving ? 0.7 : 1
+              }}>{incomeSaving ? "Saving..." : "Add"}</button>
+            </div>
+            {incomeError && <p style={{ margin: "8px 0 0", color: "#f87171", fontSize: 12 }}>{incomeError}</p>}
+          </div>
+        )}
       </div>
 
       {/* Log spend */}
@@ -315,10 +390,10 @@ export default function App() {
         </div>
         {error && <p style={{ margin: "0 0 8px", color: "#f87171", fontSize: 12 }}>{error}</p>}
         <button onClick={handleAdd} disabled={loading} style={{
-          width: "100%", background: "#4338ca", border: "none", borderRadius: 8, padding: "12px",
+          width: "100%", background: justSaved ? "#166534" : "#4338ca", border: "none", borderRadius: 8, padding: "12px",
           color: "#fff", fontSize: 15, fontWeight: 600, cursor: "pointer", letterSpacing: 0.3,
           opacity: loading ? 0.7 : 1, transition: "background 0.2s"
-        }}>{loading ? "Categorising..." : "+ Add Expense"}</button>
+        }}>{loading ? "Categorising..." : justSaved ? "Saved ✓" : "+ Add Expense"}</button>
       </div>
     </div>
   );
@@ -326,12 +401,32 @@ export default function App() {
   const FeedPanel = (
     <div>
       <p style={{ margin: "0 0 10px", fontSize: 10, letterSpacing: 2, color: "#475569", textTransform: "uppercase", fontFamily: "'JetBrains Mono',monospace" }}>
-        {monthLabel} — {monthEntries.length} {monthEntries.length === 1 ? "entry" : "entries"}
+        {monthLabel} — {monthFeed.length} {monthFeed.length === 1 ? "entry" : "entries"}
       </p>
-      {monthEntries.length === 0
-        ? <div style={{ background: "#1e293b", borderRadius: 12, padding: "32px 20px", textAlign: "center", color: "#334155", fontSize: 14 }}>No expenses logged yet.</div>
+      {monthFeed.length === 0
+        ? <div style={{ background: "#1e293b", borderRadius: 12, padding: "32px 20px", textAlign: "center", color: "#334155", fontSize: 14 }}>Nothing logged yet.</div>
         : <div style={{ display: "grid", gap: 8 }}>
-          {monthEntries.map(e => {
+          {monthFeed.map(e => {
+            if (e.kind === "income") {
+              return (
+                <div key={"inc-" + e.id} className="entry-row"
+                  style={{ background: "#1e293b", borderRadius: 10, padding: "12px 14px", border: "1px solid #16653444", display: "flex", alignItems: "center", gap: 10 }}>
+                  <span style={{ fontSize: 20, flexShrink: 0 }}>💵</span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 3, flexWrap: "wrap" }}>
+                      <span style={{ fontSize: 14, color: "#e2e8f0", fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "calc(100% - 60px)" }}>{e.desc}</span>
+                      <span style={{ fontSize: 10, padding: "2px 7px", borderRadius: 20, flexShrink: 0, background: "#052e16", color: "#4ade80" }}>Income</span>
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <span style={{ fontSize: 11, color: "#475569" }}>{e.date} {e.time}</span>
+                    </div>
+                  </div>
+                  <span style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 14, fontWeight: 700, color: "#4ade80", flexShrink: 0 }}>+{fmt(e.amount)}</span>
+                  <button className="del-btn" onClick={() => deleteIncome(e.id)}
+                    style={{ background: "none", border: "none", color: "#475569", cursor: "pointer", fontSize: 15, padding: "2px 4px", lineHeight: 1, flexShrink: 0 }}>✕</button>
+                </div>
+              );
+            }
             const cat = getCat(e.category);
             return (
               <div key={e.id} className="entry-row"
