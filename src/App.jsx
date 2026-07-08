@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect } from "react";
 import { db } from "./firebase";
 import {
-  collection, addDoc, deleteDoc,
+  collection, addDoc, deleteDoc, updateDoc,
   doc, onSnapshot, query, orderBy
 } from "firebase/firestore";
 
@@ -15,10 +15,107 @@ const CATEGORIES = [
   { id: "utilities", label: "Utilities", color: "#14b8a6", icon: "⚡" },
   { id: "savings", label: "Savings", color: "#84cc16", icon: "💰" },
   { id: "other", label: "Other", color: "#94a3b8", icon: "📦" },
+  { id: "uncategorised", label: "To Categorise", color: "#64748b", icon: "❓" },
 ];
+
+const CLASSIFIABLE_IDS = CATEGORIES.filter(c => c.id !== "uncategorised").map(c => c.id).join(", ");
 
 const fmt = (n) => "₹" + Math.round(n).toLocaleString("en-IN");
 const fmtSigned = (n) => (n < 0 ? "-" : "") + fmt(Math.abs(n));
+
+// ---- Bank statement CSV parsing ----
+function parseCSV(text) {
+  const rows = [];
+  let row = [], field = "", inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++; }
+        else inQuotes = false;
+      } else field += ch;
+    } else if (ch === '"') inQuotes = true;
+    else if (ch === ",") { row.push(field); field = ""; }
+    else if (ch === "\n" || ch === "\r") {
+      if (ch === "\r" && text[i + 1] === "\n") i++;
+      row.push(field); field = "";
+      if (row.some(c => c.trim() !== "")) rows.push(row);
+      row = [];
+    } else field += ch;
+  }
+  row.push(field);
+  if (row.some(c => c.trim() !== "")) rows.push(row);
+  return rows;
+}
+
+const MONTH_ABBR = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+
+function parseTxnDate(s) {
+  s = String(s || "").trim();
+  let m = s.match(/^(\d{4})-(\d{2})-(\d{2})/); // yyyy-mm-dd
+  if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+  m = s.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})/); // dd/mm/yyyy, dd-mm-yy (Indian banks use day first)
+  if (m) {
+    const y = m[3].length === 2 ? "20" + m[3] : m[3];
+    return `${y}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}`;
+  }
+  m = s.match(/^(\d{1,2})[\s-]([A-Za-z]{3})[A-Za-z]*[\s,-]+(\d{2,4})/); // 01 Jan 2026, 01-Jan-26
+  if (m) {
+    const mo = MONTH_ABBR[m[2].toLowerCase()];
+    if (!mo) return null;
+    const y = m[3].length === 2 ? "20" + m[3] : m[3];
+    return `${y}-${String(mo).padStart(2, "0")}-${m[1].padStart(2, "0")}`;
+  }
+  return null;
+}
+
+function parseAmount(s) {
+  const n = parseFloat(String(s || "").replace(/[₹,\s]/g, ""));
+  return isNaN(n) ? 0 : n;
+}
+
+const DESC_HEADERS = ["narration", "description", "particulars", "details", "remarks"];
+
+function detectColumns(rows) {
+  for (let i = 0; i < Math.min(rows.length, 30); i++) {
+    const hdr = rows[i].map(h => String(h).toLowerCase().trim());
+    const dateIdx = hdr.findIndex(h => h.includes("date"));
+    if (dateIdx === -1) continue;
+    const descIdx = hdr.findIndex(h => DESC_HEADERS.some(k => h.includes(k)));
+    const debitIdx = hdr.findIndex(h => h.includes("debit") || h.includes("withdrawal"));
+    const creditIdx = hdr.findIndex(h => h.includes("credit") || h.includes("deposit"));
+    const amountIdx = hdr.findIndex(h => h.includes("amount"));
+    const typeIdx = hdr.findIndex(h => h.replace(/\s/g, "") === "dr/cr" || h.replace(/\s/g, "") === "cr/dr" || h === "type");
+    if (descIdx !== -1 && (debitIdx !== -1 || amountIdx !== -1)) {
+      return { headerRow: i, dateIdx, descIdx, debitIdx, creditIdx, amountIdx, typeIdx };
+    }
+  }
+  return null;
+}
+
+function extractTxns(rows, cols) {
+  const out = [];
+  for (let i = cols.headerRow + 1; i < rows.length; i++) {
+    const r = rows[i];
+    const date = parseTxnDate(r[cols.dateIdx]);
+    if (!date) continue; // skips preamble/summary rows
+    const desc = String(r[cols.descIdx] || "").trim().replace(/\s+/g, " ") || "Bank transaction";
+    let amount = 0, type = "debit";
+    if (cols.debitIdx !== -1 || cols.creditIdx !== -1) {
+      const d = cols.debitIdx !== -1 ? parseAmount(r[cols.debitIdx]) : 0;
+      const c = cols.creditIdx !== -1 ? parseAmount(r[cols.creditIdx]) : 0;
+      if (d > 0) { amount = d; type = "debit"; }
+      else if (c > 0) { amount = c; type = "credit"; }
+    } else if (cols.amountIdx !== -1) {
+      amount = parseAmount(r[cols.amountIdx]);
+      const t = cols.typeIdx !== -1 ? String(r[cols.typeIdx] || "").toLowerCase() : "";
+      if (amount < 0) { amount = Math.abs(amount); type = "debit"; }
+      else type = t.includes("cr") ? "credit" : "debit";
+    }
+    if (amount > 0) out.push({ date, desc, amount, type });
+  }
+  return out;
+}
 
 function DonutChart({ segments, total, size = 180 }) {
   const r = size * 0.36, cx = size / 2, cy = size / 2;
@@ -167,6 +264,13 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [justSaved, setJustSaved] = useState(false);
   const [error, setError] = useState("");
+  const [importTxns, setImportTxns] = useState(null);
+  const [importSelected, setImportSelected] = useState(new Set());
+  const [importError, setImportError] = useState("");
+  const [importResult, setImportResult] = useState("");
+  const [importing, setImporting] = useState(false);
+  const [editPick, setEditPick] = useState(null); // { id, kind, desc, amount, category, nature }
+  const [aiSuggesting, setAiSuggesting] = useState(false);
   const [mobileTab, setMobileTab] = useState("add"); // "overview" | "add" | "history"
   const [month, setMonth] = useState(() => {
     const n = new Date();
@@ -197,10 +301,12 @@ export default function App() {
   const needsTotal = useMemo(() => monthEntries.filter(e => e.nature === "need").reduce((a, e) => a + e.amount, 0), [monthEntries]);
   const topCat = useMemo(() => {
     if (total === 0) return null;
-    return CATEGORIES.reduce((best, c) => catTotals[c.id] > catTotals[best.id] ? c : best);
+    const real = CATEGORIES.filter(c => c.id !== "uncategorised");
+    const best = real.reduce((b, c) => catTotals[c.id] > catTotals[b.id] ? c : b);
+    return catTotals[best.id] > 0 ? best : null;
   }, [catTotals, total]);
   const segments = CATEGORIES.map(c => ({ ...c, value: catTotals[c.id] }));
-  const getCat = id => CATEGORIES.find(c => c.id === id) || CATEGORIES[CATEGORIES.length - 1];
+  const getCat = id => CATEGORIES.find(c => c.id === id) || CATEGORIES.find(c => c.id === "other");
   const monthFeed = useMemo(() => [
     ...monthIncomes.map(e => ({ ...e, kind: "income" })),
     ...monthEntries.map(e => ({ ...e, kind: "expense" })),
@@ -264,7 +370,7 @@ export default function App() {
           description: desc.trim(),
           amount,
           nature: nature === "need" ? "Need" : "Want",
-          categories: CATEGORIES.map(c => c.id).join(", ")
+          categories: CLASSIFIABLE_IDS
         })
       });
       const data = await res.json();
@@ -320,6 +426,119 @@ export default function App() {
 
   async function deleteIncome(id) {
     await deleteDoc(doc(db, "incomes", id));
+  }
+
+  function handleFile(ev) {
+    const file = ev.target.files && ev.target.files[0];
+    ev.target.value = "";
+    if (!file) return;
+    setImportError(""); setImportResult("");
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const rows = parseCSV(String(reader.result));
+        const cols = detectColumns(rows);
+        if (!cols) { setImportError("Couldn't find transaction columns. Export a CSV statement from your bank and try again."); return; }
+        const txns = extractTxns(rows, cols);
+        if (txns.length === 0) { setImportError("No transactions found in this file."); return; }
+        setImportTxns(txns);
+        setImportSelected(new Set(txns.map((t, i) => (t.type === "debit" ? i : -1)).filter(i => i >= 0)));
+      } catch {
+        setImportError("Couldn't read this file. Make sure it's a CSV export.");
+      }
+    };
+    reader.readAsText(file);
+  }
+
+  function toggleTxn(i) {
+    setImportSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(i)) next.delete(i); else next.add(i);
+      return next;
+    });
+  }
+
+  async function runImport() {
+    setImporting(true);
+    try {
+      const keyOf = e => `${e.date}|${e.amount}|${String(e.desc || "").toLowerCase()}`;
+      const existing = new Set([...entries.map(keyOf), ...incomes.map(keyOf)]);
+      let addedExp = 0, addedInc = 0, skipped = 0;
+      const ops = [];
+      importTxns.forEach((t, i) => {
+        if (!importSelected.has(i)) return;
+        const k = keyOf(t);
+        if (existing.has(k)) { skipped++; return; }
+        existing.add(k);
+        const createdAt = new Date(t.date).getTime() + i; // sorts into the right spot in history
+        if (t.type === "credit") {
+          ops.push(addDoc(collection(db, "incomes"), { desc: t.desc, amount: t.amount, date: t.date, time: "", createdAt, source: "import" }));
+          addedInc++;
+        } else {
+          ops.push(addDoc(collection(db, "entries"), { desc: t.desc, amount: t.amount, nature: null, category: "uncategorised", date: t.date, time: "", createdAt, source: "import" }));
+          addedExp++;
+        }
+      });
+      await Promise.all(ops);
+      setImportResult(`Imported ${addedExp} expense${addedExp === 1 ? "" : "s"}${addedInc ? ` and ${addedInc} income` : ""}${skipped ? `, skipped ${skipped} duplicate${skipped === 1 ? "" : "s"}` : ""}.`);
+      setImportTxns(null); setImportSelected(new Set());
+    } catch {
+      setImportError("Import failed partway. Check your connection and re-upload; duplicates will be skipped.");
+    } finally {
+      setImporting(false);
+    }
+  }
+
+  function openExpenseEdit(e) {
+    setEditPick({
+      id: e.id, kind: "expense", desc: e.desc, amount: String(e.amount),
+      category: e.category === "uncategorised" ? null : e.category,
+      nature: e.nature || null
+    });
+  }
+
+  function openIncomeEdit(e) {
+    setEditPick({ id: e.id, kind: "income", desc: e.desc, amount: String(e.amount) });
+  }
+
+  const canSaveEdit = !!(editPick && editPick.desc.trim() && parseFloat(editPick.amount) > 0);
+
+  async function saveEdit() {
+    if (!canSaveEdit) return;
+    const amt = parseFloat(editPick.amount);
+    if (editPick.kind === "income") {
+      await updateDoc(doc(db, "incomes", editPick.id), { desc: editPick.desc.trim(), amount: amt });
+    } else {
+      await updateDoc(doc(db, "entries", editPick.id), {
+        desc: editPick.desc.trim(), amount: amt,
+        category: editPick.category || "uncategorised",
+        nature: editPick.category ? (editPick.nature || "need") : null
+      });
+    }
+    setEditPick(null);
+  }
+
+  async function aiSuggest(entry) {
+    setAiSuggesting(true);
+    try {
+      const res = await fetch("/api/classify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          description: entry.desc,
+          amount: entry.amount,
+          nature: editPick && editPick.nature === "want" ? "Want" : "Need",
+          categories: CLASSIFIABLE_IDS
+        })
+      });
+      const data = await res.json();
+      const cat = CATEGORIES.find(c => c.id === data.category && c.id !== "uncategorised");
+      if (cat) setEditPick(p => (p ? { ...p, category: cat.id, nature: p.nature || "need" } : p));
+    } catch {
+      // API unavailable; user can pick manually
+    } finally {
+      setAiSuggesting(false);
+    }
   }
 
   const summaryProps = { segments, catTotals, total, incomeVal, remaining, savingsRate, needsTotal, wantsTotal, topCat, monthLabel, balance };
@@ -398,6 +617,51 @@ export default function App() {
     </div>
   );
 
+  const ImportPanel = (
+    <div style={{ background: "#1e293b", borderRadius: 14, padding: 16, border: "1px solid #334155" }}>
+      <p style={{ margin: "0 0 10px", fontSize: 10, letterSpacing: 2, color: "#64748b", textTransform: "uppercase", fontFamily: "'JetBrains Mono',monospace" }}>Import Bank Statement</p>
+      {!importTxns ? (
+        <>
+          <p style={{ margin: "0 0 12px", fontSize: 12, color: "#64748b", lineHeight: 1.5 }}>
+            Export a CSV statement from your bank app and upload it here. Debits come in as expenses marked "To Categorise" so you can fill in details later; credits can be imported as income. Duplicates are skipped automatically.
+          </p>
+          <label style={{ display: "block", background: "#0f172a", border: "1px dashed #334155", borderRadius: 10, padding: "18px 12px", textAlign: "center", color: "#94a3b8", fontSize: 13, cursor: "pointer" }}>
+            📄 Choose CSV file
+            <input type="file" accept=".csv,text/csv" onChange={handleFile} style={{ display: "none" }} />
+          </label>
+          {importError && <p style={{ margin: "10px 0 0", color: "#f87171", fontSize: 12 }}>{importError}</p>}
+          {importResult && <p style={{ margin: "10px 0 0", color: "#4ade80", fontSize: 12 }}>{importResult}</p>}
+        </>
+      ) : (
+        <>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8, fontSize: 11, color: "#64748b" }}>
+            <span style={{ flex: 1 }}>{importSelected.size} of {importTxns.length} selected</span>
+            <button onClick={() => setImportSelected(new Set(importTxns.map((_, i) => i)))} style={{ background: "none", border: "none", color: "#818cf8", fontSize: 11, cursor: "pointer", padding: 0 }}>All</button>
+            <button onClick={() => setImportSelected(new Set(importTxns.map((t, i) => (t.type === "debit" ? i : -1)).filter(i => i >= 0)))} style={{ background: "none", border: "none", color: "#818cf8", fontSize: 11, cursor: "pointer", padding: 0 }}>Debits</button>
+            <button onClick={() => setImportSelected(new Set())} style={{ background: "none", border: "none", color: "#818cf8", fontSize: 11, cursor: "pointer", padding: 0 }}>None</button>
+          </div>
+          <div style={{ maxHeight: 300, overflowY: "auto", display: "grid", gap: 4, marginBottom: 10 }}>
+            {importTxns.map((t, i) => (
+              <label key={i} style={{ display: "flex", alignItems: "center", gap: 8, background: "#0f172a", borderRadius: 8, padding: "8px 10px", cursor: "pointer", border: "1px solid #1e293b" }}>
+                <input type="checkbox" checked={importSelected.has(i)} onChange={() => toggleTxn(i)} />
+                <span style={{ fontSize: 10, color: "#475569", fontFamily: "'JetBrains Mono',monospace", flexShrink: 0 }}>{t.date}</span>
+                <span style={{ flex: 1, fontSize: 12, color: "#cbd5e1", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.desc}</span>
+                <span style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 12, fontWeight: 700, flexShrink: 0, color: t.type === "credit" ? "#4ade80" : "#f59e0b" }}>{t.type === "credit" ? "+" : ""}{fmt(t.amount)}</span>
+              </label>
+            ))}
+          </div>
+          {importError && <p style={{ margin: "0 0 8px", color: "#f87171", fontSize: 12 }}>{importError}</p>}
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={() => { setImportTxns(null); setImportSelected(new Set()); }} style={{ flex: 1, background: "transparent", border: "1px solid #334155", borderRadius: 8, padding: "10px", color: "#94a3b8", fontSize: 13, cursor: "pointer" }}>Cancel</button>
+            <button onClick={runImport} disabled={importing || importSelected.size === 0} style={{ flex: 2, background: "#4338ca", border: "none", borderRadius: 8, padding: "10px", color: "#fff", fontSize: 13, fontWeight: 600, cursor: "pointer", opacity: importing || importSelected.size === 0 ? 0.6 : 1 }}>
+              {importing ? "Importing..." : `Import ${importSelected.size} selected`}
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+
   const FeedPanel = (
     <div>
       <p style={{ margin: "0 0 10px", fontSize: 10, letterSpacing: 2, color: "#475569", textTransform: "uppercase", fontFamily: "'JetBrains Mono',monospace" }}>
@@ -409,46 +673,120 @@ export default function App() {
           {monthFeed.map(e => {
             if (e.kind === "income") {
               return (
-                <div key={"inc-" + e.id} className="entry-row"
-                  style={{ background: "#1e293b", borderRadius: 10, padding: "12px 14px", border: "1px solid #16653444", display: "flex", alignItems: "center", gap: 10 }}>
-                  <span style={{ fontSize: 20, flexShrink: 0 }}>💵</span>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 3, flexWrap: "wrap" }}>
-                      <span style={{ fontSize: 14, color: "#e2e8f0", fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "calc(100% - 60px)" }}>{e.desc}</span>
-                      <span style={{ fontSize: 10, padding: "2px 7px", borderRadius: 20, flexShrink: 0, background: "#052e16", color: "#4ade80" }}>Income</span>
+                <div key={"inc-" + e.id}>
+                  <div className="entry-row"
+                    style={{ background: "#1e293b", borderRadius: 10, padding: "12px 14px", border: "1px solid #16653444", display: "flex", alignItems: "center", gap: 10 }}>
+                    <span style={{ fontSize: 20, flexShrink: 0 }}>💵</span>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 3, flexWrap: "wrap" }}>
+                        <span style={{ fontSize: 14, color: "#e2e8f0", fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "calc(100% - 60px)" }}>{e.desc}</span>
+                        <span style={{ fontSize: 10, padding: "2px 7px", borderRadius: 20, flexShrink: 0, background: "#052e16", color: "#4ade80" }}>Income</span>
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <span style={{ fontSize: 11, color: "#475569" }}>{e.date} {e.time}</span>
+                      </div>
                     </div>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                      <span style={{ fontSize: 11, color: "#475569" }}>{e.date} {e.time}</span>
-                    </div>
+                    <span style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 14, fontWeight: 700, color: "#4ade80", flexShrink: 0 }}>+{fmt(e.amount)}</span>
+                    <button className="del-btn" onClick={() => openIncomeEdit(e)}
+                      style={{ background: "none", border: "none", color: "#475569", cursor: "pointer", fontSize: 14, padding: "2px 4px", lineHeight: 1, flexShrink: 0 }}>✎</button>
+                    <button className="del-btn" onClick={() => deleteIncome(e.id)}
+                      style={{ background: "none", border: "none", color: "#475569", cursor: "pointer", fontSize: 15, padding: "2px 4px", lineHeight: 1, flexShrink: 0 }}>✕</button>
                   </div>
-                  <span style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 14, fontWeight: 700, color: "#4ade80", flexShrink: 0 }}>+{fmt(e.amount)}</span>
-                  <button className="del-btn" onClick={() => deleteIncome(e.id)}
-                    style={{ background: "none", border: "none", color: "#475569", cursor: "pointer", fontSize: 15, padding: "2px 4px", lineHeight: 1, flexShrink: 0 }}>✕</button>
+                  {editPick && editPick.kind === "income" && editPick.id === e.id && (
+                    <div style={{ background: "#0f172a", border: "1px solid #334155", borderRadius: 10, padding: 12, marginTop: 6 }}>
+                      <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+                        <input value={editPick.desc} onChange={ev => setEditPick(p => ({ ...p, desc: ev.target.value }))}
+                          style={{ flex: 2, minWidth: 140, background: "#1e293b", border: "1px solid #334155", borderRadius: 8, padding: "9px 11px", color: "#e2e8f0", fontSize: 13, outline: "none" }} />
+                        <div style={{ flex: 1, minWidth: 100, background: "#1e293b", border: "1px solid #334155", borderRadius: 8, padding: "8px 11px", display: "flex", alignItems: "center", gap: 5 }}>
+                          <span style={{ color: "#64748b", fontFamily: "'JetBrains Mono',monospace", fontSize: 14 }}>₹</span>
+                          <input type="number" value={editPick.amount} onChange={ev => setEditPick(p => ({ ...p, amount: ev.target.value }))}
+                            style={{ background: "transparent", border: "none", color: "#84cc16", fontFamily: "'JetBrains Mono',monospace", fontSize: 15, fontWeight: 700, width: "100%", outline: "none" }} />
+                        </div>
+                      </div>
+                      <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
+                        <button onClick={() => setEditPick(null)} style={{ padding: "6px 10px", borderRadius: 8, border: "1px solid #334155", background: "transparent", color: "#94a3b8", fontSize: 12, cursor: "pointer" }}>Cancel</button>
+                        <button onClick={saveEdit} disabled={!canSaveEdit} style={{
+                          padding: "6px 14px", borderRadius: 8, border: "none", background: "#4338ca",
+                          color: "#fff", fontSize: 12, fontWeight: 600, cursor: "pointer", opacity: canSaveEdit ? 1 : 0.5
+                        }}>Save</button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               );
             }
             const cat = getCat(e.category);
+            const isPending = e.category === "uncategorised";
             return (
-              <div key={e.id} className="entry-row"
-                style={{ background: "#1e293b", borderRadius: 10, padding: "12px 14px", border: `1px solid ${cat.color}22`, display: "flex", alignItems: "center", gap: 10 }}>
-                <span style={{ fontSize: 20, flexShrink: 0 }}>{cat.icon}</span>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 3, flexWrap: "wrap" }}>
-                    <span style={{ fontSize: 14, color: "#e2e8f0", fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "calc(100% - 60px)" }}>{e.desc}</span>
-                    <span style={{
-                      fontSize: 10, padding: "2px 7px", borderRadius: 20, flexShrink: 0,
-                      background: e.nature === "need" ? "#052e16" : "#2e1065",
-                      color: e.nature === "need" ? "#4ade80" : "#a78bfa"
-                    }}>{e.nature === "need" ? "Need" : "Want"}</span>
+              <div key={e.id}>
+                <div className="entry-row"
+                  style={{ background: "#1e293b", borderRadius: 10, padding: "12px 14px", border: `1px solid ${cat.color}22`, display: "flex", alignItems: "center", gap: 10 }}>
+                  <span style={{ fontSize: 20, flexShrink: 0 }}>{cat.icon}</span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 3, flexWrap: "wrap" }}>
+                      <span style={{ fontSize: 14, color: "#e2e8f0", fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "calc(100% - 60px)" }}>{e.desc}</span>
+                      {e.nature && <span style={{
+                        fontSize: 10, padding: "2px 7px", borderRadius: 20, flexShrink: 0,
+                        background: e.nature === "need" ? "#052e16" : "#2e1065",
+                        color: e.nature === "need" ? "#4ade80" : "#a78bfa"
+                      }}>{e.nature === "need" ? "Need" : "Want"}</span>}
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      {isPending
+                        ? <button onClick={() => openExpenseEdit(e)} style={{ background: "none", border: "none", padding: 0, fontSize: 11, color: "#f59e0b", cursor: "pointer", textDecoration: "underline dotted" }}>❓ Categorise</button>
+                        : <span style={{ fontSize: 11, color: cat.color }}>{cat.label}</span>}
+                      <span style={{ fontSize: 11, color: "#475569" }}>{e.date} {e.time}</span>
+                    </div>
                   </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <span style={{ fontSize: 11, color: cat.color }}>{cat.label}</span>
-                    <span style={{ fontSize: 11, color: "#475569" }}>{e.date} {e.time}</span>
-                  </div>
+                  <span style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 14, fontWeight: 700, color: "#f8fafc", flexShrink: 0 }}>{fmt(e.amount)}</span>
+                  <button className="del-btn" onClick={() => openExpenseEdit(e)}
+                    style={{ background: "none", border: "none", color: "#475569", cursor: "pointer", fontSize: 14, padding: "2px 4px", lineHeight: 1, flexShrink: 0 }}>✎</button>
+                  <button className="del-btn" onClick={() => deleteEntry(e.id)}
+                    style={{ background: "none", border: "none", color: "#475569", cursor: "pointer", fontSize: 15, padding: "2px 4px", lineHeight: 1, flexShrink: 0 }}>✕</button>
                 </div>
-                <span style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 14, fontWeight: 700, color: "#f8fafc", flexShrink: 0 }}>{fmt(e.amount)}</span>
-                <button className="del-btn" onClick={() => deleteEntry(e.id)}
-                  style={{ background: "none", border: "none", color: "#475569", cursor: "pointer", fontSize: 15, padding: "2px 4px", lineHeight: 1, flexShrink: 0 }}>✕</button>
+                {editPick && editPick.kind === "expense" && editPick.id === e.id && (
+                  <div style={{ background: "#0f172a", border: "1px solid #334155", borderRadius: 10, padding: 12, marginTop: 6 }}>
+                    <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+                      <input value={editPick.desc} onChange={ev => setEditPick(p => ({ ...p, desc: ev.target.value }))}
+                        style={{ flex: 2, minWidth: 140, background: "#1e293b", border: "1px solid #334155", borderRadius: 8, padding: "9px 11px", color: "#e2e8f0", fontSize: 13, outline: "none" }} />
+                      <div style={{ flex: 1, minWidth: 100, background: "#1e293b", border: "1px solid #334155", borderRadius: 8, padding: "8px 11px", display: "flex", alignItems: "center", gap: 5 }}>
+                        <span style={{ color: "#64748b", fontFamily: "'JetBrains Mono',monospace", fontSize: 14 }}>₹</span>
+                        <input type="number" value={editPick.amount} onChange={ev => setEditPick(p => ({ ...p, amount: ev.target.value }))}
+                          style={{ background: "transparent", border: "none", color: "#f59e0b", fontFamily: "'JetBrains Mono',monospace", fontSize: 15, fontWeight: 700, width: "100%", outline: "none" }} />
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+                      {CATEGORIES.filter(c => c.id !== "uncategorised").map(c => (
+                        <button key={c.id} onClick={() => setEditPick(p => ({ ...p, category: c.id, nature: p.nature || "need" }))} style={{
+                          padding: "5px 10px", borderRadius: 20, fontSize: 12, cursor: "pointer",
+                          border: `1px solid ${editPick.category === c.id ? c.color : "#334155"}`,
+                          background: editPick.category === c.id ? c.color + "33" : "transparent",
+                          color: editPick.category === c.id ? "#f1f5f9" : "#94a3b8"
+                        }}>{c.icon} {c.label}</button>
+                      ))}
+                    </div>
+                    <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                      {["need", "want"].map(n => (
+                        <button key={n} onClick={() => setEditPick(p => ({ ...p, nature: n }))} style={{
+                          padding: "6px 10px", borderRadius: 8, border: "1px solid", cursor: "pointer", fontSize: 12, fontWeight: 600,
+                          background: editPick.nature === n ? (n === "need" ? "#10b981" : "#8b5cf6") : "transparent",
+                          borderColor: editPick.nature === n ? (n === "need" ? "#10b981" : "#8b5cf6") : "#334155",
+                          color: editPick.nature === n ? "#fff" : "#64748b"
+                        }}>{n === "need" ? "🧾 Need" : "✨ Want"}</button>
+                      ))}
+                      <button onClick={() => aiSuggest(e)} disabled={aiSuggesting} style={{
+                        padding: "6px 10px", borderRadius: 8, border: "1px solid #4338ca", background: "transparent",
+                        color: "#818cf8", fontSize: 12, fontWeight: 600, cursor: "pointer", opacity: aiSuggesting ? 0.6 : 1
+                      }}>{aiSuggesting ? "Thinking..." : "✨ AI suggest"}</button>
+                      <div style={{ flex: 1 }} />
+                      <button onClick={() => setEditPick(null)} style={{ padding: "6px 10px", borderRadius: 8, border: "1px solid #334155", background: "transparent", color: "#94a3b8", fontSize: 12, cursor: "pointer" }}>Cancel</button>
+                      <button onClick={saveEdit} disabled={!canSaveEdit} style={{
+                        padding: "6px 14px", borderRadius: 8, border: "none", background: "#4338ca",
+                        color: "#fff", fontSize: 12, fontWeight: 600, cursor: "pointer", opacity: canSaveEdit ? 1 : 0.5
+                      }}>Save</button>
+                    </div>
+                  </div>
+                )}
               </div>
             );
           })}
@@ -495,6 +833,7 @@ export default function App() {
         {/* Left: form + feed */}
         <div style={{ display: "grid", gap: 16 }}>
           {AddForm}
+          {ImportPanel}
           {FeedPanel}
         </div>
         {/* Right: sticky summary */}
@@ -509,6 +848,7 @@ export default function App() {
         <div style={{ flex: 1, padding: "16px 14px 80px", overflowY: "auto" }}>
           {mobileTab === "overview" && <SummaryPanel {...summaryProps} donutSize={220} />}
           {mobileTab === "add" && AddForm}
+          {mobileTab === "import" && ImportPanel}
           {mobileTab === "history" && FeedPanel}
         </div>
 
@@ -521,6 +861,7 @@ export default function App() {
           {[
             { id: "overview", icon: "📊", label: "Overview" },
             { id: "add", icon: "➕", label: "Add" },
+            { id: "import", icon: "📥", label: "Import" },
             { id: "history", icon: "🧾", label: "History" },
           ].map(tab => (
             <button key={tab.id} onClick={() => setMobileTab(tab.id)} style={{

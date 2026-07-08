@@ -24,7 +24,7 @@ A personal expense tracking app built with React, Firebase, and Gemini AI. Log s
 |---|---|
 | Frontend | React 18 + Vite |
 | Database | Firebase Firestore |
-| AI Categorisation | Google Gemini 2.0 Flash |
+| AI Categorisation | Google Gemini (gemini-flash-latest, with fallbacks) |
 | Hosting | Vercel |
 | Version control | Git + GitHub |
 
@@ -87,7 +87,7 @@ VITE_FIREBASE_MEASUREMENT_ID=your_value
 VITE_GEMINI_API_KEY=your_value
 ```
 
-> The Gemini API key is only used via the Vercel proxy in production. Locally, expenses will save correctly but will default to the "Other" category due to browser CORS restrictions.
+> AI categorisation works locally too: `vite.config.js` serves a dev version of `/api/classify` using `GEMINI_API_KEY` (or `VITE_GEMINI_API_KEY`) from your `.env`. The key is never exposed to the browser.
 
 ### 4. Run locally
 
