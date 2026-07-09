@@ -518,16 +518,17 @@ export default function App() {
     setEditPick(null);
   }
 
-  async function aiSuggest(entry) {
+  async function aiSuggest() {
+    if (!editPick) return;
     setAiSuggesting(true);
     try {
       const res = await fetch("/api/classify", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          description: entry.desc,
-          amount: entry.amount,
-          nature: editPick && editPick.nature === "want" ? "Want" : "Need",
+          description: editPick.desc,
+          amount: editPick.amount,
+          nature: editPick.nature === "want" ? "Want" : "Need",
           categories: CLASSIFIABLE_IDS
         })
       });
@@ -673,120 +674,55 @@ export default function App() {
           {monthFeed.map(e => {
             if (e.kind === "income") {
               return (
-                <div key={"inc-" + e.id}>
-                  <div className="entry-row"
-                    style={{ background: "#1e293b", borderRadius: 10, padding: "12px 14px", border: "1px solid #16653444", display: "flex", alignItems: "center", gap: 10 }}>
-                    <span style={{ fontSize: 20, flexShrink: 0 }}>💵</span>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 3, flexWrap: "wrap" }}>
-                        <span style={{ fontSize: 14, color: "#e2e8f0", fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "calc(100% - 60px)" }}>{e.desc}</span>
-                        <span style={{ fontSize: 10, padding: "2px 7px", borderRadius: 20, flexShrink: 0, background: "#052e16", color: "#4ade80" }}>Income</span>
-                      </div>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        <span style={{ fontSize: 11, color: "#475569" }}>{e.date} {e.time}</span>
-                      </div>
+                <div key={"inc-" + e.id} className="entry-row"
+                  onClick={() => { if (window.matchMedia("(max-width: 640px)").matches) openIncomeEdit(e); }}
+                  style={{ background: "#1e293b", borderRadius: 10, padding: "12px 14px", border: "1px solid #16653444", display: "flex", alignItems: "center", gap: 10 }}>
+                  <span style={{ fontSize: 20, flexShrink: 0 }}>💵</span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 3, flexWrap: "wrap" }}>
+                      <span style={{ fontSize: 14, color: "#e2e8f0", fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "calc(100% - 60px)" }}>{e.desc}</span>
+                      <span style={{ fontSize: 10, padding: "2px 7px", borderRadius: 20, flexShrink: 0, background: "#052e16", color: "#4ade80" }}>Income</span>
                     </div>
-                    <span style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 14, fontWeight: 700, color: "#4ade80", flexShrink: 0 }}>+{fmt(e.amount)}</span>
-                    <button className="del-btn" onClick={() => openIncomeEdit(e)}
-                      style={{ background: "none", border: "none", color: "#475569", cursor: "pointer", fontSize: 14, padding: "2px 4px", lineHeight: 1, flexShrink: 0 }}>✎</button>
-                    <button className="del-btn" onClick={() => deleteIncome(e.id)}
-                      style={{ background: "none", border: "none", color: "#475569", cursor: "pointer", fontSize: 15, padding: "2px 4px", lineHeight: 1, flexShrink: 0 }}>✕</button>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <span style={{ fontSize: 11, color: "#475569" }}>{e.date} {e.time}</span>
+                    </div>
                   </div>
-                  {editPick && editPick.kind === "income" && editPick.id === e.id && (
-                    <div style={{ background: "#0f172a", border: "1px solid #334155", borderRadius: 10, padding: 12, marginTop: 6 }}>
-                      <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
-                        <input value={editPick.desc} onChange={ev => setEditPick(p => ({ ...p, desc: ev.target.value }))}
-                          style={{ flex: 2, minWidth: 140, background: "#1e293b", border: "1px solid #334155", borderRadius: 8, padding: "9px 11px", color: "#e2e8f0", fontSize: 13, outline: "none" }} />
-                        <div style={{ flex: 1, minWidth: 100, background: "#1e293b", border: "1px solid #334155", borderRadius: 8, padding: "8px 11px", display: "flex", alignItems: "center", gap: 5 }}>
-                          <span style={{ color: "#64748b", fontFamily: "'JetBrains Mono',monospace", fontSize: 14 }}>₹</span>
-                          <input type="number" value={editPick.amount} onChange={ev => setEditPick(p => ({ ...p, amount: ev.target.value }))}
-                            style={{ background: "transparent", border: "none", color: "#84cc16", fontFamily: "'JetBrains Mono',monospace", fontSize: 15, fontWeight: 700, width: "100%", outline: "none" }} />
-                        </div>
-                      </div>
-                      <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
-                        <button onClick={() => setEditPick(null)} style={{ padding: "6px 10px", borderRadius: 8, border: "1px solid #334155", background: "transparent", color: "#94a3b8", fontSize: 12, cursor: "pointer" }}>Cancel</button>
-                        <button onClick={saveEdit} disabled={!canSaveEdit} style={{
-                          padding: "6px 14px", borderRadius: 8, border: "none", background: "#4338ca",
-                          color: "#fff", fontSize: 12, fontWeight: 600, cursor: "pointer", opacity: canSaveEdit ? 1 : 0.5
-                        }}>Save</button>
-                      </div>
-                    </div>
-                  )}
+                  <span style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 14, fontWeight: 700, color: "#4ade80", flexShrink: 0 }}>+{fmt(e.amount)}</span>
+                  <button className="edit-btn" onClick={ev => { ev.stopPropagation(); openIncomeEdit(e); }}
+                    style={{ background: "none", border: "none", color: "#475569", cursor: "pointer", fontSize: 14, padding: "2px 4px", lineHeight: 1, flexShrink: 0 }}>✎</button>
+                  <button className="del-btn" onClick={ev => { ev.stopPropagation(); deleteIncome(e.id); }}
+                    style={{ background: "none", border: "none", color: "#475569", cursor: "pointer", fontSize: 15, padding: "2px 4px", lineHeight: 1, flexShrink: 0 }}>✕</button>
                 </div>
               );
             }
             const cat = getCat(e.category);
             const isPending = e.category === "uncategorised";
             return (
-              <div key={e.id}>
-                <div className="entry-row"
-                  style={{ background: "#1e293b", borderRadius: 10, padding: "12px 14px", border: `1px solid ${cat.color}22`, display: "flex", alignItems: "center", gap: 10 }}>
-                  <span style={{ fontSize: 20, flexShrink: 0 }}>{cat.icon}</span>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 3, flexWrap: "wrap" }}>
-                      <span style={{ fontSize: 14, color: "#e2e8f0", fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "calc(100% - 60px)" }}>{e.desc}</span>
-                      {e.nature && <span style={{
-                        fontSize: 10, padding: "2px 7px", borderRadius: 20, flexShrink: 0,
-                        background: e.nature === "need" ? "#052e16" : "#2e1065",
-                        color: e.nature === "need" ? "#4ade80" : "#a78bfa"
-                      }}>{e.nature === "need" ? "Need" : "Want"}</span>}
-                    </div>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                      {isPending
-                        ? <button onClick={() => openExpenseEdit(e)} style={{ background: "none", border: "none", padding: 0, fontSize: 11, color: "#f59e0b", cursor: "pointer", textDecoration: "underline dotted" }}>❓ Categorise</button>
-                        : <span style={{ fontSize: 11, color: cat.color }}>{cat.label}</span>}
-                      <span style={{ fontSize: 11, color: "#475569" }}>{e.date} {e.time}</span>
-                    </div>
+              <div key={e.id} className="entry-row"
+                onClick={() => { if (window.matchMedia("(max-width: 640px)").matches) openExpenseEdit(e); }}
+                style={{ background: "#1e293b", borderRadius: 10, padding: "12px 14px", border: `1px solid ${cat.color}22`, display: "flex", alignItems: "center", gap: 10 }}>
+                <span style={{ fontSize: 20, flexShrink: 0 }}>{cat.icon}</span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 3, flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 14, color: "#e2e8f0", fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "calc(100% - 60px)" }}>{e.desc}</span>
+                    {e.nature && <span style={{
+                      fontSize: 10, padding: "2px 7px", borderRadius: 20, flexShrink: 0,
+                      background: e.nature === "need" ? "#052e16" : "#2e1065",
+                      color: e.nature === "need" ? "#4ade80" : "#a78bfa"
+                    }}>{e.nature === "need" ? "Need" : "Want"}</span>}
                   </div>
-                  <span style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 14, fontWeight: 700, color: "#f8fafc", flexShrink: 0 }}>{fmt(e.amount)}</span>
-                  <button className="del-btn" onClick={() => openExpenseEdit(e)}
-                    style={{ background: "none", border: "none", color: "#475569", cursor: "pointer", fontSize: 14, padding: "2px 4px", lineHeight: 1, flexShrink: 0 }}>✎</button>
-                  <button className="del-btn" onClick={() => deleteEntry(e.id)}
-                    style={{ background: "none", border: "none", color: "#475569", cursor: "pointer", fontSize: 15, padding: "2px 4px", lineHeight: 1, flexShrink: 0 }}>✕</button>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    {isPending
+                      ? <button onClick={ev => { ev.stopPropagation(); openExpenseEdit(e); }} style={{ background: "none", border: "none", padding: 0, fontSize: 11, color: "#f59e0b", cursor: "pointer", textDecoration: "underline dotted" }}>❓ Categorise</button>
+                      : <span style={{ fontSize: 11, color: cat.color }}>{cat.label}</span>}
+                    <span style={{ fontSize: 11, color: "#475569" }}>{e.date} {e.time}</span>
+                  </div>
                 </div>
-                {editPick && editPick.kind === "expense" && editPick.id === e.id && (
-                  <div style={{ background: "#0f172a", border: "1px solid #334155", borderRadius: 10, padding: 12, marginTop: 6 }}>
-                    <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
-                      <input value={editPick.desc} onChange={ev => setEditPick(p => ({ ...p, desc: ev.target.value }))}
-                        style={{ flex: 2, minWidth: 140, background: "#1e293b", border: "1px solid #334155", borderRadius: 8, padding: "9px 11px", color: "#e2e8f0", fontSize: 13, outline: "none" }} />
-                      <div style={{ flex: 1, minWidth: 100, background: "#1e293b", border: "1px solid #334155", borderRadius: 8, padding: "8px 11px", display: "flex", alignItems: "center", gap: 5 }}>
-                        <span style={{ color: "#64748b", fontFamily: "'JetBrains Mono',monospace", fontSize: 14 }}>₹</span>
-                        <input type="number" value={editPick.amount} onChange={ev => setEditPick(p => ({ ...p, amount: ev.target.value }))}
-                          style={{ background: "transparent", border: "none", color: "#f59e0b", fontFamily: "'JetBrains Mono',monospace", fontSize: 15, fontWeight: 700, width: "100%", outline: "none" }} />
-                      </div>
-                    </div>
-                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
-                      {CATEGORIES.filter(c => c.id !== "uncategorised").map(c => (
-                        <button key={c.id} onClick={() => setEditPick(p => ({ ...p, category: c.id, nature: p.nature || "need" }))} style={{
-                          padding: "5px 10px", borderRadius: 20, fontSize: 12, cursor: "pointer",
-                          border: `1px solid ${editPick.category === c.id ? c.color : "#334155"}`,
-                          background: editPick.category === c.id ? c.color + "33" : "transparent",
-                          color: editPick.category === c.id ? "#f1f5f9" : "#94a3b8"
-                        }}>{c.icon} {c.label}</button>
-                      ))}
-                    </div>
-                    <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-                      {["need", "want"].map(n => (
-                        <button key={n} onClick={() => setEditPick(p => ({ ...p, nature: n }))} style={{
-                          padding: "6px 10px", borderRadius: 8, border: "1px solid", cursor: "pointer", fontSize: 12, fontWeight: 600,
-                          background: editPick.nature === n ? (n === "need" ? "#10b981" : "#8b5cf6") : "transparent",
-                          borderColor: editPick.nature === n ? (n === "need" ? "#10b981" : "#8b5cf6") : "#334155",
-                          color: editPick.nature === n ? "#fff" : "#64748b"
-                        }}>{n === "need" ? "🧾 Need" : "✨ Want"}</button>
-                      ))}
-                      <button onClick={() => aiSuggest(e)} disabled={aiSuggesting} style={{
-                        padding: "6px 10px", borderRadius: 8, border: "1px solid #4338ca", background: "transparent",
-                        color: "#818cf8", fontSize: 12, fontWeight: 600, cursor: "pointer", opacity: aiSuggesting ? 0.6 : 1
-                      }}>{aiSuggesting ? "Thinking..." : "✨ AI suggest"}</button>
-                      <div style={{ flex: 1 }} />
-                      <button onClick={() => setEditPick(null)} style={{ padding: "6px 10px", borderRadius: 8, border: "1px solid #334155", background: "transparent", color: "#94a3b8", fontSize: 12, cursor: "pointer" }}>Cancel</button>
-                      <button onClick={saveEdit} disabled={!canSaveEdit} style={{
-                        padding: "6px 14px", borderRadius: 8, border: "none", background: "#4338ca",
-                        color: "#fff", fontSize: 12, fontWeight: 600, cursor: "pointer", opacity: canSaveEdit ? 1 : 0.5
-                      }}>Save</button>
-                    </div>
-                  </div>
-                )}
+                <span style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 14, fontWeight: 700, color: "#f8fafc", flexShrink: 0 }}>{fmt(e.amount)}</span>
+                <button className="edit-btn" onClick={ev => { ev.stopPropagation(); openExpenseEdit(e); }}
+                  style={{ background: "none", border: "none", color: "#475569", cursor: "pointer", fontSize: 14, padding: "2px 4px", lineHeight: 1, flexShrink: 0 }}>✎</button>
+                <button className="del-btn" onClick={ev => { ev.stopPropagation(); deleteEntry(e.id); }}
+                  style={{ background: "none", border: "none", color: "#475569", cursor: "pointer", fontSize: 15, padding: "2px 4px", lineHeight: 1, flexShrink: 0 }}>✕</button>
               </div>
             );
           })}
@@ -803,10 +739,11 @@ export default function App() {
         input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none}
         input::placeholder{color:#334155}
         input[type="month"]::-webkit-calendar-picker-indicator{filter:invert(0.4);cursor:pointer}
-        .del-btn{opacity:0;transition:opacity 0.15s}
-        .entry-row:hover .del-btn{opacity:1}
+        .del-btn,.edit-btn{opacity:0;transition:opacity 0.15s}
+        .entry-row:hover .del-btn,.entry-row:hover .edit-btn{opacity:1}
         @media(max-width:640px){
           .del-btn{opacity:1 !important}
+          .edit-btn{display:none !important}
           .desktop-layout{display:none !important}
           .mobile-layout{display:flex !important}
         }
@@ -879,6 +816,66 @@ export default function App() {
           ))}
         </div>
       </div>
+
+      {/* ---- EDIT POPUP (mobile: tap card / desktop: pencil icon) ---- */}
+      {editPick && (
+        <div onClick={() => setEditPick(null)}
+          style={{ position: "fixed", inset: 0, background: "rgba(2,6,23,0.72)", zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+          <div onClick={ev => ev.stopPropagation()}
+            style={{ background: "#1e293b", border: "1px solid #334155", borderRadius: 16, padding: 16, width: "100%", maxWidth: 480, maxHeight: "85vh", overflowY: "auto" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+              <p style={{ margin: 0, fontSize: 10, letterSpacing: 2, color: "#64748b", textTransform: "uppercase", fontFamily: "'JetBrains Mono',monospace" }}>
+                {editPick.kind === "income" ? "Edit Income" : "Edit Expense"}
+              </p>
+              <button onClick={() => setEditPick(null)} style={{ background: "none", border: "none", color: "#64748b", cursor: "pointer", fontSize: 16, lineHeight: 1, padding: 4 }}>✕</button>
+            </div>
+            <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+              <input value={editPick.desc} onChange={ev => setEditPick(p => ({ ...p, desc: ev.target.value }))}
+                style={{ flex: 2, minWidth: 140, background: "#0f172a", border: "1px solid #334155", borderRadius: 8, padding: "10px 12px", color: "#e2e8f0", fontSize: 14, outline: "none" }} />
+              <div style={{ flex: 1, minWidth: 100, background: "#0f172a", border: "1px solid #334155", borderRadius: 8, padding: "9px 12px", display: "flex", alignItems: "center", gap: 5 }}>
+                <span style={{ color: "#64748b", fontFamily: "'JetBrains Mono',monospace", fontSize: 14 }}>₹</span>
+                <input type="number" value={editPick.amount} onChange={ev => setEditPick(p => ({ ...p, amount: ev.target.value }))}
+                  style={{ background: "transparent", border: "none", color: editPick.kind === "income" ? "#84cc16" : "#f59e0b", fontFamily: "'JetBrains Mono',monospace", fontSize: 16, fontWeight: 700, width: "100%", outline: "none" }} />
+              </div>
+            </div>
+            {editPick.kind === "expense" && (
+              <>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 12 }}>
+                  {CATEGORIES.filter(c => c.id !== "uncategorised").map(c => (
+                    <button key={c.id} onClick={() => setEditPick(p => ({ ...p, category: c.id, nature: p.nature || "need" }))} style={{
+                      padding: "6px 11px", borderRadius: 20, fontSize: 12, cursor: "pointer",
+                      border: `1px solid ${editPick.category === c.id ? c.color : "#334155"}`,
+                      background: editPick.category === c.id ? c.color + "33" : "transparent",
+                      color: editPick.category === c.id ? "#f1f5f9" : "#94a3b8"
+                    }}>{c.icon} {c.label}</button>
+                  ))}
+                </div>
+                <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", marginBottom: 12 }}>
+                  {["need", "want"].map(n => (
+                    <button key={n} onClick={() => setEditPick(p => ({ ...p, nature: n }))} style={{
+                      padding: "7px 12px", borderRadius: 8, border: "1px solid", cursor: "pointer", fontSize: 12, fontWeight: 600,
+                      background: editPick.nature === n ? (n === "need" ? "#10b981" : "#8b5cf6") : "transparent",
+                      borderColor: editPick.nature === n ? (n === "need" ? "#10b981" : "#8b5cf6") : "#334155",
+                      color: editPick.nature === n ? "#fff" : "#64748b"
+                    }}>{n === "need" ? "🧾 Need" : "✨ Want"}</button>
+                  ))}
+                  <button onClick={aiSuggest} disabled={aiSuggesting} style={{
+                    padding: "7px 12px", borderRadius: 8, border: "1px solid #4338ca", background: "transparent",
+                    color: "#818cf8", fontSize: 12, fontWeight: 600, cursor: "pointer", opacity: aiSuggesting ? 0.6 : 1
+                  }}>{aiSuggesting ? "Thinking..." : "✨ AI suggest"}</button>
+                </div>
+              </>
+            )}
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <button onClick={() => setEditPick(null)} style={{ padding: "9px 14px", borderRadius: 8, border: "1px solid #334155", background: "transparent", color: "#94a3b8", fontSize: 13, cursor: "pointer" }}>Cancel</button>
+              <button onClick={saveEdit} disabled={!canSaveEdit} style={{
+                padding: "9px 18px", borderRadius: 8, border: "none", background: "#4338ca",
+                color: "#fff", fontSize: 13, fontWeight: 600, cursor: "pointer", opacity: canSaveEdit ? 1 : 0.5
+              }}>Save</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
