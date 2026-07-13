@@ -23,6 +23,27 @@ const CLASSIFIABLE_IDS = CATEGORIES.filter(c => c.id !== "uncategorised").map(c 
 const fmt = (n) => "₹" + Math.round(n).toLocaleString("en-IN");
 const fmtSigned = (n) => (n < 0 ? "-" : "") + fmt(Math.abs(n));
 
+// Single place all AI categorisation goes through. Returns a category id or null.
+async function classifyViaApi(description, amount, natureVal) {
+  try {
+    const res = await fetch("/api/classify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        description,
+        amount,
+        nature: natureVal === "want" ? "Want" : "Need",
+        categories: CLASSIFIABLE_IDS
+      })
+    });
+    const data = await res.json();
+    const cat = CATEGORIES.find(c => c.id === data.category && c.id !== "uncategorised");
+    return cat ? cat.id : null;
+  } catch {
+    return null;
+  }
+}
+
 // ---- Bank statement CSV parsing ----
 function parseCSV(text) {
   const rows = [];
@@ -269,7 +290,9 @@ export default function App() {
   const [importError, setImportError] = useState("");
   const [importResult, setImportResult] = useState("");
   const [importing, setImporting] = useState(false);
-  const [editPick, setEditPick] = useState(null); // { id, kind, desc, amount, category, nature }
+  const [editPick, setEditPick] = useState(null); // { id, kind, desc, amount, category, nature, origDesc, picked }
+  const [editSaving, setEditSaving] = useState(false);
+  const [bulkCat, setBulkCat] = useState(null); // { done, total }
   const [aiSuggesting, setAiSuggesting] = useState(false);
   const [mobileTab, setMobileTab] = useState("add"); // "overview" | "add" | "history"
   const [month, setMonth] = useState(() => {
@@ -311,6 +334,7 @@ export default function App() {
     ...monthIncomes.map(e => ({ ...e, kind: "income" })),
     ...monthEntries.map(e => ({ ...e, kind: "expense" })),
   ].sort((a, b) => b.createdAt - a.createdAt), [monthIncomes, monthEntries]);
+  const needsCat = useMemo(() => entries.filter(e => e.category === "other" || e.category === "uncategorised").length, [entries]);
 
   // async function handleAdd() {
   //   if (!desc.trim() || !amount || parseFloat(amount) <= 0) {
@@ -360,24 +384,7 @@ export default function App() {
     }
     setError(""); setLoading(true);
 
-    let category = "other";
-
-    try {
-      const res = await fetch("/api/classify", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          description: desc.trim(),
-          amount,
-          nature: nature === "need" ? "Need" : "Want",
-          categories: CLASSIFIABLE_IDS
-        })
-      });
-      const data = await res.json();
-      category = CATEGORIES.find(c => c.id === data.category)?.id || "other";
-    } catch {
-      // network error — category stays "other"
-    }
+    const category = (await classifyViaApi(desc.trim(), amount, nature)) || "other";
 
     try {
       const entry = {
@@ -493,7 +500,8 @@ export default function App() {
     setEditPick({
       id: e.id, kind: "expense", desc: e.desc, amount: String(e.amount),
       category: e.category === "uncategorised" ? null : e.category,
-      nature: e.nature || null
+      nature: e.nature || null,
+      origDesc: e.desc, picked: false
     });
   }
 
@@ -504,42 +512,55 @@ export default function App() {
   const canSaveEdit = !!(editPick && editPick.desc.trim() && parseFloat(editPick.amount) > 0);
 
   async function saveEdit() {
-    if (!canSaveEdit) return;
+    if (!canSaveEdit || editSaving) return;
     const amt = parseFloat(editPick.amount);
-    if (editPick.kind === "income") {
-      await updateDoc(doc(db, "incomes", editPick.id), { desc: editPick.desc.trim(), amount: amt });
-    } else {
-      await updateDoc(doc(db, "entries", editPick.id), {
-        desc: editPick.desc.trim(), amount: amt,
-        category: editPick.category || "uncategorised",
-        nature: editPick.category ? (editPick.nature || "need") : null
-      });
+    const desc = editPick.desc.trim();
+    setEditSaving(true);
+    try {
+      if (editPick.kind === "income") {
+        await updateDoc(doc(db, "incomes", editPick.id), { desc, amount: amt });
+      } else {
+        let category = editPick.category || "uncategorised";
+        let nature = editPick.category ? (editPick.nature || "need") : null;
+        // Re-run AI categorisation when the description changed and the user
+        // didn't manually pick a category in this edit.
+        const descChanged = desc !== String(editPick.origDesc || "").trim();
+        if (!editPick.picked && descChanged) {
+          const suggested = await classifyViaApi(desc, amt, editPick.nature);
+          if (suggested) { category = suggested; nature = editPick.nature || "need"; }
+        }
+        await updateDoc(doc(db, "entries", editPick.id), { desc, amount: amt, category, nature });
+      }
+      setEditPick(null);
+    } finally {
+      setEditSaving(false);
     }
-    setEditPick(null);
   }
 
   async function aiSuggest() {
     if (!editPick) return;
     setAiSuggesting(true);
-    try {
-      const res = await fetch("/api/classify", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          description: editPick.desc,
-          amount: editPick.amount,
-          nature: editPick.nature === "want" ? "Want" : "Need",
-          categories: CLASSIFIABLE_IDS
-        })
-      });
-      const data = await res.json();
-      const cat = CATEGORIES.find(c => c.id === data.category && c.id !== "uncategorised");
-      if (cat) setEditPick(p => (p ? { ...p, category: cat.id, nature: p.nature || "need" } : p));
-    } catch {
-      // API unavailable; user can pick manually
-    } finally {
-      setAiSuggesting(false);
+    const suggested = await classifyViaApi(editPick.desc, editPick.amount, editPick.nature);
+    if (suggested) setEditPick(p => (p ? { ...p, category: suggested, nature: p.nature || "need", picked: true } : p));
+    setAiSuggesting(false);
+  }
+
+  async function bulkCategorise() {
+    const targets = entries.filter(e => e.category === "other" || e.category === "uncategorised");
+    if (targets.length === 0 || bulkCat) return;
+    setBulkCat({ done: 0, total: targets.length });
+    for (const e of targets) {
+      const suggested = await classifyViaApi(e.desc, e.amount, e.nature);
+      if (suggested && suggested !== e.category) {
+        try {
+          await updateDoc(doc(db, "entries", e.id), { category: suggested, nature: e.nature || "need" });
+        } catch {
+          // keep going with the rest
+        }
+      }
+      setBulkCat(b => (b ? { ...b, done: b.done + 1 } : b));
     }
+    setBulkCat(null);
   }
 
   const summaryProps = { segments, catTotals, total, incomeVal, remaining, savingsRate, needsTotal, wantsTotal, topCat, monthLabel, balance };
@@ -665,6 +686,20 @@ export default function App() {
 
   const FeedPanel = (
     <div>
+      {needsCat > 0 && (
+        <div style={{ background: "#1e1b4b", border: "1px solid #4338ca", borderRadius: 10, padding: "10px 12px", marginBottom: 12, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 12, color: "#c7d2fe", flex: 1, minWidth: 160 }}>
+            {bulkCat
+              ? `Categorising ${bulkCat.done} of ${bulkCat.total}...`
+              : `${needsCat} expense${needsCat === 1 ? "" : "s"} sitting in "Other" or "To Categorise" (all months)`}
+          </span>
+          <button onClick={bulkCategorise} disabled={!!bulkCat} style={{
+            background: "#4338ca", border: "none", borderRadius: 8, padding: "8px 12px",
+            color: "#fff", fontSize: 12, fontWeight: 600, cursor: "pointer", flexShrink: 0,
+            opacity: bulkCat ? 0.7 : 1
+          }}>{bulkCat ? "Working..." : "✨ AI categorise all"}</button>
+        </div>
+      )}
       <p style={{ margin: "0 0 10px", fontSize: 10, letterSpacing: 2, color: "#475569", textTransform: "uppercase", fontFamily: "'JetBrains Mono',monospace" }}>
         {monthLabel} — {monthFeed.length} {monthFeed.length === 1 ? "entry" : "entries"}
       </p>
@@ -842,7 +877,7 @@ export default function App() {
               <>
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 12 }}>
                   {CATEGORIES.filter(c => c.id !== "uncategorised").map(c => (
-                    <button key={c.id} onClick={() => setEditPick(p => ({ ...p, category: c.id, nature: p.nature || "need" }))} style={{
+                    <button key={c.id} onClick={() => setEditPick(p => ({ ...p, category: c.id, nature: p.nature || "need", picked: true }))} style={{
                       padding: "6px 11px", borderRadius: 20, fontSize: 12, cursor: "pointer",
                       border: `1px solid ${editPick.category === c.id ? c.color : "#334155"}`,
                       background: editPick.category === c.id ? c.color + "33" : "transparent",
@@ -868,10 +903,10 @@ export default function App() {
             )}
             <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
               <button onClick={() => setEditPick(null)} style={{ padding: "9px 14px", borderRadius: 8, border: "1px solid #334155", background: "transparent", color: "#94a3b8", fontSize: 13, cursor: "pointer" }}>Cancel</button>
-              <button onClick={saveEdit} disabled={!canSaveEdit} style={{
+              <button onClick={saveEdit} disabled={!canSaveEdit || editSaving} style={{
                 padding: "9px 18px", borderRadius: 8, border: "none", background: "#4338ca",
-                color: "#fff", fontSize: 13, fontWeight: 600, cursor: "pointer", opacity: canSaveEdit ? 1 : 0.5
-              }}>Save</button>
+                color: "#fff", fontSize: 13, fontWeight: 600, cursor: "pointer", opacity: canSaveEdit && !editSaving ? 1 : 0.5
+              }}>{editSaving ? "Categorising..." : "Save"}</button>
             </div>
           </div>
         </div>
